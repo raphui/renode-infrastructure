@@ -115,7 +115,7 @@ namespace Antmicro.Renode.Peripherals.Network
 
                 {(long)Registers.NetworkConfiguration, new DoubleWordRegister(this, 0x80000)
                     .WithTag("speed", 0, 1)
-                    .WithTag("full_duplex", 1, 1)
+                    .WithFlag(1, FieldMode.Read | FieldMode.Write, name: "full_duplex", valueProviderCallback: _ => true)
                     .WithTag("discard_non_vlan_frames", 2, 1)
                     .WithTag("jumbo_frames", 3, 1)
                     .WithTag("copy_all_frames", 4, 1)
@@ -124,7 +124,7 @@ namespace Antmicro.Renode.Peripherals.Network
                     .WithTag("unicast_hash_enable", 7, 1)
                     .WithTag("receive_1536_byte_frames", 8, 1)
                     .WithTag("external_address_match_enable", 9, 1)
-                    .WithTag("gigabit_mode_enable", 10, 1)
+                    .WithFlag(10, FieldMode.Read | FieldMode.Write, name: "gigabit_mode_enable", valueProviderCallback: _ => true)
                     .WithTag("pcs_select", 11, 1)
                     .WithTag("retry_test", 12, 1)
                     .WithTag("pause_enable", 13, 1)
@@ -144,7 +144,7 @@ namespace Antmicro.Renode.Peripherals.Network
                     .WithTag("uni_direction_enable", 31, 1)
                 },
 
-                {(long)Registers.NetworkStatus, new DoubleWordRegister(this)
+                {(long)Registers.NetworkStatus, new DoubleWordRegister(this, 0x6)
                     .WithTag("pcs_link_state", 0, 1)
                     .WithTag("mdio_in", 1, 1)
                     .WithFlag(2, FieldMode.Read, name: "man_done", valueProviderCallback: _ => true)
@@ -330,7 +330,7 @@ namespace Antmicro.Renode.Peripherals.Network
                     .WithTag("fix_number", 28, 4)
                 },
 
-                {(long)Registers.DesignConfiguration1, new DoubleWordRegister(this)
+                {(long)Registers.DesignConfiguration1, new DoubleWordRegister(this, 0x02D00111)
                     .WithTag("no_pcs", 0, 1)
                     .WithTag("serdes", 1, 1)
                     .WithTag("RDC_50", 2, 1)
@@ -352,7 +352,7 @@ namespace Antmicro.Renode.Peripherals.Network
                     .WithTag("axi_cache_value", 28, 4)
                 },
 
-                {(long)Registers.DesignConfiguration2, new DoubleWordRegister(this)
+                {(long)Registers.DesignConfiguration2, new DoubleWordRegister(this, 0x2AB12800)
                     .WithTag("jumbo_max_length", 0, 16)
                     .WithTag("hprot_value", 16, 4)
                     .WithFlag(20, FieldMode.Read, name: "rx_pkt_buffer", valueProviderCallback: _ => true) // includes the receiver packet buffer
