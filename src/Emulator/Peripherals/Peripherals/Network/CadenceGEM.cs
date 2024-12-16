@@ -165,7 +165,15 @@ namespace Antmicro.Renode.Peripherals.Network
                     .WithTag("tx_pbuf_size", 10, 1)
                     .WithFlag(11, out checksumGeneratorEnabled, name: "tx_pbuf_tcp_en")
                     .WithReservedBits(12, 4)
-                    .WithTag("rx_buf_size", 16, 8)
+                    .WithValueField(16, 8, out rxBufSize, name: "rx_buf_size",
+                        writeCallback: (_, value) =>
+                        {
+                            if(value != 0)
+                            {
+                                this.Log(LogLevel.Warning, "rx_buf_size {0}", value);
+                                rxBufSize.Value = value;
+                            }
+                        })
                     .WithTag("force_discard_on_err", 24, 1)
                     .WithTag("force_max_amba_burst_rx", 25, 1)
                     .WithTag("force_max_amba_burst_tx", 26, 1)
@@ -203,7 +211,7 @@ namespace Antmicro.Renode.Peripherals.Network
                                 this.Log(LogLevel.Warning, "Changing value of receive buffer queue base address while reception is enabled is illegal");
                                 return;
                             }
-                            rxDescriptorsQueue = new DmaBufferDescriptorsQueue<DmaRxBufferDescriptor>(sysbus, (uint)value << 2, (sb, addr) => new DmaRxBufferDescriptor(sb, addr, dmaAddressBusWith.Value, extendedRxBufferDescriptorEnabled.Value));
+                            rxDescriptorsQueue = new DmaBufferDescriptorsQueue<DmaRxBufferDescriptor>(sysbus, (uint)value << 2, (sb, addr) => new DmaRxBufferDescriptor(sb, addr, dmaAddressBusWith.Value, extendedRxBufferDescriptorEnabled.Value, rxBufSize.Value * 64));
                         })
                 },
 
@@ -473,7 +481,7 @@ namespace Antmicro.Renode.Peripherals.Network
             registers.Reset();
             interruptManager.Reset();
             txDescriptorsQueue = new DmaBufferDescriptorsQueue<DmaTxBufferDescriptor>(sysbus, (uint)value << 2, (sb, addr) => new DmaTxBufferDescriptor(sb, addr, dmaAddressBusWith.Value, extendedTxBufferDescriptorEnabled.Value));
-            rxDescriptorsQueue = new DmaBufferDescriptorsQueue<DmaRxBufferDescriptor>(sysbus, (uint)value << 2, (sb, addr) => new DmaRxBufferDescriptor(sb, addr, dmaAddressBusWith.Value, extendedRxBufferDescriptorEnabled.Value));
+            rxDescriptorsQueue = new DmaBufferDescriptorsQueue<DmaRxBufferDescriptor>(sysbus, (uint)value << 2, (sb, addr) => new DmaRxBufferDescriptor(sb, addr, dmaAddressBusWith.Value, extendedRxBufferDescriptorEnabled.Value, rxBufSize.Value * 64));
             phyDataRead = 0;
             isTransmissionStarted = false;
             nanoTimer.Reset();
@@ -498,6 +506,9 @@ namespace Antmicro.Renode.Peripherals.Network
 
         public void ReceiveFrame(EthernetFrame frame)
         {
+            uint size;
+            uint buffers = 0;
+            int rx_offset = 0;
             lock(sync)
             {
                 this.Log(LogLevel.Debug, "Received packet, length {0}", frame.Bytes.Length);
@@ -518,40 +529,62 @@ namespace Antmicro.Renode.Peripherals.Network
                 rxPacketTimestamp.seconds = (uint)secTimer.Value;
                 rxPacketTimestamp.nanos = (uint)nanoTimer.Value;
 
-                rxDescriptorsQueue.CurrentDescriptor.Invalidate();
-                if(!rxDescriptorsQueue.CurrentDescriptor.Ownership)
+                uint actualLength = (uint)(removeFrameChecksum.Value ? frame.Bytes.Length - 4 : frame.Bytes.Length);
+
+                while(actualLength > 0)
                 {
-                    var actualLength = (uint)(removeFrameChecksum.Value ? frame.Bytes.Length - 4 : frame.Bytes.Length);
-                    if(!rxDescriptorsQueue.CurrentDescriptor.WriteBuffer(frame.Bytes, actualLength, (uint)receiveBufferOffset.Value))
+                    if(actualLength > rxDescriptorsQueue.CurrentDescriptor.RxBufSize)
                     {
-                        // The current implementation doesn't handle packets that do not fit into a single buffer.
-                        // In case we encounter this error, we probably should implement partitioning/scattering procedure.
-                        this.Log(LogLevel.Warning, "Could not write the incoming packet to the DMA buffer: maximum packet length exceeded.");
-                        return;
-                    }
-
-                    rxDescriptorsQueue.CurrentDescriptor.StartOfFrame = true;
-                    rxDescriptorsQueue.CurrentDescriptor.EndOfFrame = true;
-
-                    if(rxBufferDescriptorTimeStampMode.Value != TimestampingMode.Disabled)
-                    {
-                        rxDescriptorsQueue.CurrentDescriptor.Timestamp = rxPacketTimestamp;
+                        size = (uint)rxDescriptorsQueue.CurrentDescriptor.RxBufSize;
                     }
                     else
                     {
-                        rxDescriptorsQueue.CurrentDescriptor.HasValidTimestamp = false;
+                        size = actualLength;
                     }
 
-                    rxDescriptorsQueue.GoToNextDescriptor();
+                    byte[] buff = new byte[size];
 
-                    frameReceived.Value = true;
-                    interruptManager.SetInterrupt(Interrupts.ReceiveComplete);
-                }
-                else
-                {
-                    this.Log(LogLevel.Warning, "Receive DMA buffer overflow");
-                    bufferNotAvailable.Value = true;
-                    interruptManager.SetInterrupt(Interrupts.ReceiveUsedBitRead);
+                    Buffer.BlockCopy(frame.Bytes, rx_offset, buff, 0, (int)size);
+
+                    rxDescriptorsQueue.CurrentDescriptor.Invalidate();
+                    if(!rxDescriptorsQueue.CurrentDescriptor.Ownership)
+                    {
+                        buffers++;
+                        actualLength -= size;
+
+                        if(buffers == 1)
+                        {
+                           rxDescriptorsQueue.CurrentDescriptor.StartOfFrame = true;
+                        }
+
+                        if(actualLength == 0)
+                        {
+                            rxDescriptorsQueue.CurrentDescriptor.EndOfFrame = true;
+                        }
+
+                        if(rxBufferDescriptorTimeStampMode.Value != TimestampingMode.Disabled)
+                        {
+                            rxDescriptorsQueue.CurrentDescriptor.Timestamp = rxPacketTimestamp;
+                        }
+                        else
+                        {
+                            rxDescriptorsQueue.CurrentDescriptor.HasValidTimestamp = false;
+                        }
+
+                        rxDescriptorsQueue.GoToNextDescriptor();
+
+                        if(actualLength == 0)
+                        {
+                            frameReceived.Value = true;
+                            interruptManager.SetInterrupt(Interrupts.ReceiveComplete);
+                        }
+                    }
+                    else
+                    {
+                        this.Log(LogLevel.Warning, "Receive DMA buffer overflow");
+                        bufferNotAvailable.Value = true;
+                        interruptManager.SetInterrupt(Interrupts.ReceiveUsedBitRead);
+                    }
                 }
             }
         }
@@ -707,6 +740,7 @@ namespace Antmicro.Renode.Peripherals.Network
         private readonly IFlagRegisterField frameReceived;
         private readonly IFlagRegisterField removeFrameChecksum;
         private readonly IValueRegisterField receiveBufferOffset;
+        private readonly IValueRegisterField rxBufSize;
         private readonly IEnumRegisterField<TimestampingMode> rxBufferDescriptorTimeStampMode;
         private readonly IEnumRegisterField<TimestampingMode> txBufferDescriptorTimeStampMode;
         private readonly IValueRegisterField secTimer;
@@ -923,8 +957,9 @@ namespace Antmicro.Renode.Peripherals.Network
         ///     * 4-31: Reserved
         private class DmaRxBufferDescriptor : DmaBufferDescriptor
         {
-            public DmaRxBufferDescriptor(IBusController bus, uint address, DMAAddressWidth addressWidth, bool extendedModeEnabled) : base(bus, address, addressWidth, extendedModeEnabled)
+            public DmaRxBufferDescriptor(IBusController bus, uint address, DMAAddressWidth addressWidth, bool extendedModeEnabled, ulong RxBufSize) : base(bus, address, addressWidth, extendedModeEnabled)
             {
+                this.RxBufSize = RxBufSize;
             }
 
             public bool WriteBuffer(byte[] bytes, uint length, uint offset = 0)
@@ -988,6 +1023,8 @@ namespace Antmicro.Renode.Peripherals.Network
                 get { return BitHelper.IsBitSet(words[0], 0); }
                 set { BitHelper.SetBit(ref words[0], 0, value); }
             }
+
+            public ulong RxBufSize;
 
             private const int MaximumBufferLength = (1 << 13) - 1;
         }
